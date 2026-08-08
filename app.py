@@ -70,7 +70,8 @@ def fetch_rakuten_recipes(category_id="10", count=2):
 # --- 4. メイン処理 ---
 def main():
     print("=== プログラムの実行を開始しました ===")
-    
+    print(f"[DEBUG] 読み込まれた楽天アプリID: '{RAKUTEN_APPLICATION_ID}'")
+    print(f"[DEBUG] 文字数: {len(RAKUTEN_APPLICATION_ID) if RAKUTEN_APPLICATION_ID else 0}")
     # 肉(10)、魚(11)、野菜(12)の大カテゴリIDからレシピを取得
     category_ids = ["10", "11", "12"]
     all_raw_recipes = []
