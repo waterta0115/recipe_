@@ -9,11 +9,15 @@ from pydantic import BaseModel, Field
 # 1. .env から環境変数を読み込み
 load_dotenv()
 
-RAKUTEN_APPLICATION_ID = os.getenv("RAKUTEN_APPLICATION_ID")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# .strip() を追加して前後の空白・改行コードを強制除去
+RAKUTEN_APPLICATION_ID = os.getenv("RAKUTEN_APPLICATION_ID", "").strip()
+RAKUTEN_ACCESS_KEY = os.getenv("RAKUTEN_ACCESS_KEY", "").strip()
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
 
 if not RAKUTEN_APPLICATION_ID:
     raise ValueError(".env ファイルに RAKUTEN_APPLICATION_ID が設定されていません。")
+if not RAKUTEN_ACCESS_KEY:
+    raise ValueError(".env ファイルに RAKUTEN_ACCESS_KEY が設定されていません。")
 if not GOOGLE_API_KEY:
     raise ValueError(".env ファイルに GOOGLE_API_KEY が設定されていません。")
 
@@ -28,22 +32,27 @@ class ShoppingListResponse(BaseModel):
 
 
 # --- 3. 楽天レシピAPIからデータ取得関数 ---
-def fetch_rakuten_recipes(category_id="10", count=2):
-    """
-    楽天レシピAPI（カテゴリランキング）からレシピ情報を取得する
-    ※ category_id: 10(肉), 11(魚), 12(野菜), 30(人気メニュー) など
-    """
+def fetch_rakuten_recipes(category_id=None, count=4):
     url = "https://app.rakuten.co.jp/services/api/Recipe/CategoryRanking/20170426"
+    
     params = {
         "applicationId": RAKUTEN_APPLICATION_ID,
-        "categoryId": category_id,
-        "formatVersion": "2"  # レスポンス形式を標準化
+        "accessKey": RAKUTEN_ACCESS_KEY,
+        "formatVersion": "2"
     }
     
-    print(f"楽天レシピAPIからデータを取得中... (Category ID: {category_id})")
-    response = requests.get(url, params=params)
+    if category_id:
+        params["categoryId"] = str(category_id)
     
-    # 楽天APIの利用制限（1sec/req）を考慮したウェイト
+    print(f"楽天レシピAPIからデータを取得中...")
+    
+    # 送信直前のリクエストを生成
+    req = requests.Request('GET', url, params=params).prepare()
+    print(f"[DEBUG] 送信URL: {req.url}")  # 送信される実際のURLを確認
+    
+    session = requests.Session()
+    response = session.send(req)
+    
     time.sleep(1.2)
     
     if response.status_code != 200:
@@ -56,7 +65,6 @@ def fetch_rakuten_recipes(category_id="10", count=2):
     
     extracted_recipes = []
     for r in recipes:
-        # 食材リスト（配列または文字列）を抽出
         materials = r.get("recipeMaterial", [])
         extracted_recipes.append({
             "title": r.get("recipeTitle"),
@@ -70,18 +78,13 @@ def fetch_rakuten_recipes(category_id="10", count=2):
 # --- 4. メイン処理 ---
 def main():
     print("=== プログラムの実行を開始しました ===")
-    print(f"[DEBUG] 読み込まれた楽天アプリID: '{RAKUTEN_APPLICATION_ID}'")
-    print(f"[DEBUG] 文字数: {len(RAKUTEN_APPLICATION_ID) if RAKUTEN_APPLICATION_ID else 0}")
-    # 肉(10)、魚(11)、野菜(12)の大カテゴリIDからレシピを取得
-    category_ids = ["10", "11", "12"]
-    all_raw_recipes = []
     
-    for cat_id in category_ids:
-        recipes = fetch_rakuten_recipes(category_id=cat_id, count=2)
-        all_raw_recipes.extend(recipes)
+    all_raw_recipes = fetch_rakuten_recipes(category_id=None, count=4)
 
     if not all_raw_recipes:
-        print("レシピデータが取得できませんでした。.env の RAKUTEN_APPLICATION_ID を確認してください。")
+        print("\n[確認] 楽天APIからエラーが返っています。")
+        print("1. .env に余計な引用符(\")やスペースが入っていないか確認してください。")
+        print("2. 楽天デベロッパーの管理画面でアプリID/Access Keyを発行し直してみてください。")
         return
 
     print("\n--- 取得した楽天レシピ一覧 ---")
@@ -91,8 +94,7 @@ def main():
         materials_str = ", ".join(r['materials']) if isinstance(r['materials'], list) else str(r['materials'])
         all_materials_text += f"【レシピ{idx}: {r['title']}】\n材料: {materials_str}\n\n"
 
-    # Gemini API に材料データを渡して解析・集計
-    print("Gemini APIに材料データの抽出・集計・合算をリクエスト中...")
+    print("\nGemini APIに材料データの抽出・集計・合算をリクエスト中...")
     
     client = genai.Client()
     
@@ -110,7 +112,7 @@ def main():
 """
 
     response = client.models.generate_content(
-        model='gemini-1.5-flash',  # 最新の標準モデル名に修正
+        model='gemini-1.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
