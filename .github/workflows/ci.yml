@@ -1,6 +1,9 @@
 name: Python Application CI
 
-on: [push, pull_request]
+# push のみに限定して重複実行を防ぐ
+on:
+  push:
+    branches: [ "main", "master" ]
 
 jobs:
   test:
@@ -22,7 +25,6 @@ jobs:
         pip install pytest
 
     - name: 4. pytest で単体テストを実行
-      # ↓ ここに env を追加して CI環境にダミーキーをセットします
       env:
         RAKUTEN_APPLICATION_ID: "dummy_app_id"
         RAKUTEN_ACCESS_KEY: "dummy_access_key"
