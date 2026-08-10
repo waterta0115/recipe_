@@ -1,0 +1,179 @@
+import os
+import re
+import time
+import requests
+from dotenv import load_dotenv
+
+# 1. .env から環境変数を読み込み
+load_dotenv()
+
+RAKUTEN_APPLICATION_ID = os.getenv("RAKUTEN_APPLICATION_ID", "").strip()
+RAKUTEN_ACCESS_KEY = os.getenv("RAKUTEN_ACCESS_KEY", "").strip()
+
+if not RAKUTEN_APPLICATION_ID or not RAKUTEN_ACCESS_KEY:
+    raise ValueError(".env ファイルの RAKUTEN_APPLICATION_ID または RAKUTEN_ACCESS_KEY が設定されていません。")
+
+
+# --- 2. 楽天レシピAPIからデータ取得関数 ---
+def fetch_rakuten_recipes(category_id=None, count=4):
+    """
+    楽天レシピAPI（CategoryRanking）からレシピ情報を取得
+    """
+    url = "https://openapi.rakuten.co.jp/recipems/api/Recipe/CategoryRanking/20170426"
+    
+    params = {
+        "applicationId": RAKUTEN_APPLICATION_ID,
+        "accessKey": RAKUTEN_ACCESS_KEY,
+        "format": "json",
+        "formatVersion": "2"
+    }
+    
+    if category_id:
+        params["categoryId"] = str(category_id)
+    
+    print(f"楽天レシピAPIからデータを取得中...")
+    response = requests.get(url, params=params)
+    time.sleep(1.2)
+    
+    if response.status_code != 200:
+        print(f"楽天APIエラー: Status Code {response.status_code}")
+        print(f"詳細: {response.text}")
+        return []
+
+    data = response.json()
+    recipes = data.get("result", [])[:count]
+    
+    extracted_recipes = []
+    for r in recipes:
+        extracted_recipes.append({
+            "title": r.get("recipeTitle"),
+            "url": r.get("recipeUrl"),
+            "materials": r.get("recipeMaterial", [])
+        })
+    
+    return extracted_recipes
+
+
+# --- 3. 高精度な材料・数量パース関数 ---
+def parse_material(item_str):
+    """
+    材料文字列（例: "玉ねぎ1/2個", "豚バラ肉 200g", "塩 少々"）を精度高くパースする
+    """
+    # 全角数字や記号の統一・前処理
+    item_str = item_str.translate(str.maketrans({
+        '０':'0', '１':'1', '２':'2', '３':'3', '４':'4',
+        '５':'5', '６':'6', '７':'7', '８':'8', '９':'9',
+        '／':'/', '．':'.'
+    })).strip()
+    
+    # 1. 分数パターン (例: "玉ねぎ 1/2個", "玉ねぎ1/2個")
+    frac_pattern = r'^(.*?)\s*(\d+)/(\d+)\s*([^\d\s]*)$'
+    m_frac = re.match(frac_pattern, item_str)
+    if m_frac:
+        name = m_frac.group(1).strip()
+        num, denom = float(m_frac.group(2)), float(m_frac.group(3))
+        val = num / denom
+        unit = m_frac.group(4).strip()
+        return name, val, unit, item_str
+
+    # 2. 整数・小数パターン (例: "豚バラ肉 200g", "玉ねぎ1.5個")
+    num_pattern = r'^(.*?)\s*(\d+(?:\.\d+)?)\s*([^\d\s]*)$'
+    m_num = re.match(num_pattern, item_str)
+    if m_num:
+        name = m_num.group(1).strip()
+        val = float(m_num.group(2))
+        unit = m_num.group(3).strip()
+        # 名前側に数字しか残らなかった誤検出をガード
+        if name:
+            return name, val, unit, item_str
+
+    # 3. 数量が数値化できない場合（"少々", "お好みで" 等）
+    # コロンやスペースで分離を試みる
+    parts = re.split(r'[\s ：:]+', item_str, maxsplit=1)
+    name = parts[0].strip()
+    amount_str = parts[1].strip() if len(parts) > 1 else "適量"
+    
+    return name, None, "", amount_str
+
+
+def generate_shopping_list(recipes):
+    """
+    複数のレシピ材料を精密に合算して買い物リスト化する関数
+    """
+    shopping_dict = {}
+
+    for recipe in recipes:
+        materials = recipe.get("materials", [])
+        for mat in materials:
+            name, val, unit, orig_amount = parse_material(mat)
+            if not name:
+                continue
+
+            if name not in shopping_dict:
+                shopping_dict[name] = {
+                    "total_val": val,
+                    "unit": unit,
+                    "raw_amounts": [] if val is not None else [orig_amount]
+                }
+            else:
+                # すでに存在する食材の合算処理
+                if val is not None and shopping_dict[name]["total_val"] is not None:
+                    # 単位が同じ場合（例: 個 と 個、g と g）
+                    if shopping_dict[name]["unit"] == unit:
+                        shopping_dict[name]["total_val"] += val
+                    else:
+                        # 単位が異なる場合は数値を保持せず文字列結合
+                        shopping_dict[name]["raw_amounts"].append(f"{val}{unit}")
+                else:
+                    if val is not None:
+                        shopping_dict[name]["raw_amounts"].append(f"{val}{unit}")
+                    else:
+                        shopping_dict[name]["raw_amounts"].append(orig_amount)
+
+    # 結果の整形
+    final_list = []
+    for name, info in shopping_dict.items():
+        if info["total_val"] is not None:
+            total_val = info["total_val"]
+            # 小数点がきれいな整数なら整数化 (例: 1.0 -> 1, 1.5 -> 1.5)
+            formatted_val = int(total_val) if total_val.is_integer() else round(total_val, 2)
+            
+            # 生の文字列データも残っている場合（例: 1個 + 少々）
+            if info["raw_amounts"]:
+                extra_str = ", ".join(info["raw_amounts"])
+                amount_str = f"{formatted_val}{info['unit']} (+ {extra_str})"
+            else:
+                amount_str = f"{formatted_val}{info['unit']}"
+                
+            final_list.append({"name": name, "amount": amount_str})
+        else:
+            final_list.append({"name": name, "amount": ", ".join(info["raw_amounts"])})
+
+    return final_list
+
+
+# --- 4. メイン処理 ---
+def main():
+    print("=== プログラムの実行を開始しました ===")
+    
+    recipes = fetch_rakuten_recipes(category_id=None, count=4)
+
+    if not recipes:
+        print("レシピデータが取得できませんでした。")
+        return
+
+    print("\n--- 取得した楽天レシピ一覧 ---")
+    for idx, r in enumerate(recipes, 1):
+        print(f"{idx}. {r['title']} ({r['url']})")
+        print(f"   生の材料リスト: {r['materials']}")
+
+    print("\nPython処理系で材料データの抽出・集計・合算を実行中...")
+    shopping_list = generate_shopping_list(recipes)
+
+    print("\n=================== 統合・合算された買い物リスト ===================")
+    for idx, item in enumerate(shopping_list, 1):
+        print(f"{idx}. {item['name']}: {item['amount']}")
+
+
+if __name__ == "__main__":
+    main()

@@ -14,29 +14,21 @@ if not RAKUTEN_APPLICATION_ID or not RAKUTEN_ACCESS_KEY:
     raise ValueError(".env ファイルの RAKUTEN_APPLICATION_ID または RAKUTEN_ACCESS_KEY が設定されていません。")
 
 
+# --- 設定: アレルギー・除外したい食材キーワードを指定 ---
+EXCLUDE_KEYWORDS = ["エビ", "えび", "ピーナッツ", "ネギ", "ねぎ"]
+
+
 # --- 2. recipeCost 文字列から数値 (int) を抽出する関数 ---
 def extract_cost_int(cost_str):
-    """
-    "1,000円前後" などの文字列から数値部分のみ抽出し int型で返す
-    """
     if not cost_str or cost_str == "指定なし":
         return 0
-    
-    # カンマを除去 ("1,000" -> "1000")
     cleaned_str = str(cost_str).replace(",", "")
-    
-    # 連続する数字を抽出
     match = re.search(r'\d+', cleaned_str)
-    if match:
-        return int(match.group())
-    return 0
+    return int(match.group()) if match else 0
 
 
 # --- 3. 楽天レシピAPIからデータ取得関数 ---
 def fetch_rakuten_recipes(category_id=None, count=5):
-    """
-    楽天レシピAPI（CategoryRanking）からレシピ情報と費用の目安を取得
-    """
     url = "https://openapi.rakuten.co.jp/recipems/api/Recipe/CategoryRanking/20170426"
     
     params = {
@@ -70,16 +62,20 @@ def fetch_rakuten_recipes(category_id=None, count=5):
             "title": r.get("recipeTitle"),
             "url": r.get("recipeUrl"),
             "materials": r.get("recipeMaterial", []),
-            "cost_raw": cost_raw,  # 生の文字列 ("300円前後" など)
-            "cost_int": cost_val   # 抽出した数値 (300 など)
+            "cost_raw": cost_raw,
+            "cost_int": cost_val
         })
     
     return extracted_recipes
 
 
-# --- 4. 材料名の集計・重複カウント処理 ---
-def generate_shopping_list(recipes):
+# --- 4. 材料名の集計・アレルギーフィルタリング処理 ---
+def generate_shopping_list(recipes, exclude_list):
+    """
+    指定した除外キーワードが含まれる材料を取り除き、残りの材料を集計する
+    """
     ingredient_counts = {}
+    excluded_items = set()  # 除外された材料の記録
 
     for recipe in recipes:
         materials = recipe.get("materials", [])
@@ -88,24 +84,28 @@ def generate_shopping_list(recipes):
             if not name:
                 continue
 
-            if name in ingredient_counts:
-                ingredient_counts[name] += 1
+            # 除外キーワードが含まれているかチェック
+            is_excluded = any(ex_word in name for ex_word in exclude_list)
+
+            if is_excluded:
+                excluded_items.add(name)
             else:
-                ingredient_counts[name] = 1
+                ingredient_counts[name] = ingredient_counts.get(name, 0) + 1
 
     shopping_list = [
         {"name": name, "count": count}
         for name, count in sorted(ingredient_counts.items())
     ]
     
-    return shopping_list
+    return shopping_list, list(excluded_items)
 
 
 # --- 5. メイン処理 ---
 def main():
     print("=== プログラムの実行を開始しました ===")
+    print(f"【設定中の除外キーワード】: {', '.join(EXCLUDE_KEYWORDS)}\n")
     
-    category_ids = [None]  # 必要に応じて ["10", "11", "12"] など大カテゴリIDを追加可能
+    category_ids = [None]
     all_recipes = []
 
     for cat_id in category_ids:
@@ -120,20 +120,34 @@ def main():
     total_estimated_cost = 0
 
     for idx, r in enumerate(all_recipes, 1):
-        print(f"{idx}. {r['title']}")
-        print(f"   費用の目安 (API返却値): {r['cost_raw']}  ->  抽出数値: {r['cost_int']}円")
-        print(f"   材料: {', '.join(r['materials'])}\n")
+        cost_raw = r.get("cost_raw", "指定なし")
+        cost_int = r.get("cost_int", 0)
         
-        # 数値の合算
-        total_estimated_cost += r['cost_int']
+        # アレルギー・除外食材が含まれるレシピかチェックして警告マークを表示
+        contains_warning = any(
+            any(ex_word in mat for ex_word in EXCLUDE_KEYWORDS) 
+            for mat in r.get("materials", [])
+        )
+        warning_tag = " ⚠️ [除外対象が含まれます]" if contains_warning else ""
+        
+        print(f"{idx}. {r.get('title')}{warning_tag}")
+        print(f"   費用の目安 (API返却値): {cost_raw}  ->  抽出数値: {cost_int}円")
+        print(f"   材料: {', '.join(r.get('materials', []))}\n")
+        
+        total_estimated_cost += cost_int
 
-    # 材料の集計
-    shopping_list = generate_shopping_list(all_recipes)
+    # 材料の集計とフィルタリングを実行
+    shopping_list, excluded_materials = generate_shopping_list(all_recipes, EXCLUDE_KEYWORDS)
 
-    print("=================== 集計された買い物リスト ===================")
+    print("=================== 統合・合算された買い物リスト (除外後) ===================")
     for idx, item in enumerate(shopping_list, 1):
         note = f" (★ {item['count']}個のレシピで使用)" if item['count'] > 1 else ""
         print(f"{idx}. {item['name']}{note}")
+
+    if excluded_materials:
+        print("\n------------------- 🚫 買い物リストから自動除外された材料 -------------------")
+        for mat in excluded_materials:
+            print(f"・{mat}")
 
     print("\n=================== 費用の合計目安 ===================")
     print(f"全{len(all_recipes)}件のレシピの目安費用合計: およそ {total_estimated_cost:,} 円")
@@ -141,7 +155,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-    # 案３：アレルギー・嫌いなもの除外
-    # 案４：調味料などの常備物は除外
