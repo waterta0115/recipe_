@@ -1,7 +1,11 @@
 import pytest
+import os
 from unittest.mock import patch
 from app2 import extract_cost_int, generate_shopping_list, fetch_rakuten_recipes
 
+# CI環境用にダミーの環境変数をセット
+os.environ["RAKUTEN_APPLICATION_ID"] = "dummy_id"
+os.environ["RAKUTEN_ACCESS_KEY"] = "dummy_key"
 
 # --- 1. 数値抽出機能 (extract_cost_int) のテスト ---
 def test_extract_cost_int_valid_strings():
